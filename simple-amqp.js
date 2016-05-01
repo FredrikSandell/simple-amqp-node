@@ -1,5 +1,5 @@
 var amqplib = require('amqplib');
-var uuid = require('node-uuid');
+var uuid = require('uuid');
 var when = require('when');
 var domain = require('domain');
 var defer = when.defer;
