@@ -1,149 +1,223 @@
-var amqplib = require('amqplib');
+var amqplib = require('amqplib/callback_api');
 var uuid = require('uuid');
-var when = require('when');
 var domain = require('domain');
-var defer = when.defer;
 
-exports.createEndpointFactory = function (options) {
-
+exports.createEndpointFactory = function (options, externalCallback) {
     function isInteger(n) {
         return Number(n) === n && n % 1 === 0;
     }
 
     if (options.host == undefined || options.host == null) {
-        return when.reject(Error('Option object must contain a "host" field'));
+        externalCallback(new Error('Option object must contain a "host" field'),null);
+        return;
     }
     if (options.globalTtl == undefined || options.globalTtl == null || !isInteger(options.globalTtl)) {
         options.globalTtl = 60000; //global ttl for messages are defaulted to 60 seconds
     }
-
-    return amqplib.connect('amqp://' + options.host).then(function (conn) {
-
-        function retryConnection() {
+    var connection = null;
+    var dom = domain.create();
+    dom.on('error', function() {
+        console.log('Connection failed... will attempt reconnect soon');
+        if(connection != null) {
+            connection = null;
+            retryConnection();
+        }
+    });
+    var BACKOFF_BASE = 300; //ms
+    var BACKOFF_MAX = 10000;
+    var BACKOFF_INC = 1000;
+    var backoff = BACKOFF_BASE;
+    function retryConnection() {
+        if(connection == null) {
             setTimeout(function () {
                 console.log('now attempting reconnect ...');
-                amqplib.connect('amqp://' + options.host).then(function (conn2) {
-                    console.log('connection reestablished')
-                    conn = conn2;
-                }).catch(function (err) {
-                    retryConnection();
+                amqplib.connect(options.host,function(err,conn2) {
+                    if(err) {
+                        console.log("reconnect failed!");
+                        console.log(err);
+                        if((backoff+BACKOFF_INC)<BACKOFF_MAX) {
+                            backoff+=BACKOFF_INC;
+                        }
+                        retryConnection();
+                    } else {
+                        console.log('connection reestablished');
+                        connection = conn2;
+                        backoff = BACKOFF_BASE;
+                    }
                 });
-            }, 3000);
+            }, backoff);
+        }
+    }
 
+    amqplib.connect(options.host,function(err,conn) {
+        if(err) {
+            externalCallback(err,null);
+            return;
         }
 
-        conn.on('close', function connectionClose() {
-            console.log('')
-            //retryConnection()
+        connection = conn;
+        dom.add(connection);
+
+        connection.on('close', function connectionClose(err) {
+            console.log(err);
+            externalCallback(new Error('connection closed'),null);
         });
-        conn.on('error', function () {
-            retryConnection()
+        
+        connection.on('error', function () {
+            retryConnection();
         });
 
-        function createEventReceiver(endpoint, consumer, isBroadcast) {
-            return when(conn.createChannel().then(function (ch) {
+        function createEventReceiver(endpoint, isBroadcast, consumer) {
+            var channel = null;
+            console.log("creating event receiver");
+            connection.createChannel(function(err, ch){
+                ch.on('error', function (err) {
+                    console.log("channel error");
+                    consumer(err,null);
+                });
+
+                channel = ch;
+                if(err) {
+                    console.log("error");
+                    consumer(err,null);
+                }
                 ch.assertExchange(endpoint, 'fanout', {
                     durable: false,
                     autoDelete: true
-                }).then(function () {
-                    //exchange exists
-                    return ch.assertQueue(isBroadcast ? '' : endpoint, { //empty string gives the queue a random name
+                }, function(err, ok) {
+                    console.log(ok);
+                    if(err) {
+                        consumer(err,null);
+                    }
+                    ch.assertQueue(isBroadcast ? '' : endpoint, { //empty string gives the queue a random name
                         exclusive: isBroadcast,
                         durable: false,
-                        autoDelete: true
-                    });
-                }).then(function (queueok) {
-                    return ch.bindQueue(queueok.queue, endpoint, '');//no routing pattern. Everything is forwarded
-                }).then(function (queueBound) {
-                    return ch.consume(queueBound.queue, handleMessage, {noAck: true});
-                }).then(function () {
-                    return true;
-                }).catch(function (error) {
-                    console.log(error);
-                    return false;
-                });
-                function handleMessage(msg) {
-                    consumer(msg.content.toString());
-                }
-
-                return {
-                    close: function () {
-                        ch.close();
+                        autoDelete: false
+                    }, function(err, ok) {
+                        console.log("ok");
+                        console.log(ok);
+                        if(err) {
+                            consumer(err,null);
+                        }
+                        //no routing pattern for queue. Everything is forwarded
+                        ch.bindQueue(ok.queue, endpoint, '', {},function(err,ok) {
+                            ch.consume(ok.queue, handleMessage, {noAck: true});
+                        });
+                    })
+                })
+            });
+            function handleMessage(msg) {
+                console.log(msg.content);
+                consumer(null, msg.content.toString());
+            };
+            return {
+                close: function () {
+                    if(channel) {
+                        try {
+                            channel.close();
+                        } catch (err) {
+                            //channel is already closed
+                        }
                     }
-                };
-            }));
+                }
+            };
         }
-
-        return {
+        externalCallback(null,{
 
             getQueuedEventReceiver: function (endpoint, consumer) {
-                return createEventReceiver(endpoint, consumer, false);
+                return createEventReceiver(endpoint, false, consumer);
             },
 
             getBroadcastEventReceiver: function (endpoint, consumer) {
-                return createEventReceiver(endpoint, consumer, true);
+                return createEventReceiver(endpoint, true, consumer);
             },
 
             getRpcServer: function (endpoint, func) {
-                return when(conn.createChannel().then(function (ch) {
+                var channel = null;
+                connection.createChannel(function(err,ch) {
+                    ch.on('error', function (err) {
+                        func(err,null);
+                    });
+                    if(err) {
+                        func(err,null);
+                    }
+                    channel = ch;
                     ch.assertExchange(endpoint, 'fanout', {
                         durable: false,
                         autoDelete: true
-                    }).then(function () {
-                        //exchange exists
-                        return ch.assertQueue(endpoint + "_rpcQueue", {
+                    }, function(err,ok) {
+                        if(err) {
+                            func(err,null);
+                        }
+                        ch.assertQueue(endpoint + "_rpcQueue", {
                             exclusive: false,
                             durable: false,
                             autoDelete: true
+                        },function(err,queueok) {
+                            if(err) {
+                                func(err);
+                            }
+                            //no routing pattern for queue. Everything is forwarded
+                            ch.bindQueue(queueok.queue, endpoint, '',{}, function(err, queueBound){
+                                if(err) {
+                                    func(err,null);
+                                }
+                                ch.prefetch(1);
+                                ch.consume(queueBound.queue, handleMessage, {noAck: true});
+                            });
+                        })
+                    })
+                });
+                function handleMessage(msg) {
+                    var response = func(null,msg.content.toString());
+                    channel.sendToQueue(msg.properties.replyTo,
+                        new Buffer(response.toString()),
+                        {correlationId: msg.properties.correlationId},function(err,ok) {
+                            if(err) {
+                                func(err,null);
+                            }
                         });
-                    }).then(function (queueok) {
-                        return ch.bindQueue(queueok.queue, endpoint, '');//no routing pattern. Everything is forwarded
-                    }).then(function (queueBound) {
-                        ch.prefetch(1);
-                        return ch.consume(queueBound.queue, handleMessage, {noAck: true});
-                    }).then(function () {
-                        return true;
-                    }).catch(function (error) {
-                        console.log(error);
-                        return false;
-                    });
-                    function handleMessage(msg) {
-                        var response = func(msg.content.toString());
-                        ch.sendToQueue(msg.properties.replyTo,
-                            new Buffer(response.toString()),
-                            {correlationId: msg.properties.correlationId});
-                    }
-
-                    return {
-                        close: function () {
-                            ch.close();
+                }
+                return {
+                    close: function () {
+                        if(channel) {
+                            try {
+                                channel.close();
+                            } catch (err) {
+                                //channel is already closed
+                            }
                         }
-                    };
-                }));
+                    }
+                };
             },
 
             getEventEmitter: function () {
                 return {
-                    emit: function (endpoint, message) {
-                        conn.createChannel().then(function (ch) {
+                    emit: function (endpoint, message, callback) {
+                        connection.createChannel(function(err,ch) {
+                            ch.on('error', function (err) {
+                                callback(err,null);
+                            });
+
                             var dom = domain.create();
-                            var result = defer();
                             dom.on('error', function (err) {
-                                result.reject(err);
+                                callback(err, null);
                             });
                             dom.run(function () {
                                 ch.publish(endpoint, '', new Buffer(message), {
                                     expiration: options.globalTtl,
                                     persistent: false
+                                }, function(err,ok) {
+                                    if(ch) {
+                                        try {
+                                            ch.close();
+                                        } catch (err) {
+                                            //channel is already closed
+                                        }
+                                    }
                                 });
-                                try {
-                                    ch.close();
-                                } catch (err) {
-                                    //channel is already closed
-                                }
-                                result.resolve(true);
+                                callback(null,true);
                             });
-                            return result.promise;
                         });
                     }
                 };
@@ -152,66 +226,81 @@ exports.createEndpointFactory = function (options) {
             getRpcClient: function () {
 
                 return {
-                    call: function (endpoint, message, timeout) {
-                        var answer = defer();
+                    call: function (endpoint, message, timeout, callback) {
+                        var channel = null;
+                        var timeoutCallback = null;
                         var dom = domain.create();
                         dom.on('error', function (err) {
-                            answer.reject(err);
+                            callback(err,null);
                         });
 
                         dom.run(function () {
-                            console.log('calling rpc');
                             if (timeout != undefined && timeout != null && isInteger(timeout) && timeout > options.globalTtl) {
-                                throw new Error('The timeout must be lower than the configured globalTtl. Currently set to ' + options.globalTtl);
+                                callback(new Error('The timeout must be lower than the configured globalTtl. Currently set to ' + options.globalTtl),null);
                             }
-                            conn.createChannel().then(function (ch) {
+                            connection.createChannel(function(err,ch) {
+                                ch.on('error', function (err) {
+                                    callback(err,null);
+                                });
+
+                                if(err) {
+                                    callback(err,null);
+                                }
+                                channel = ch;
                                 var corrId = uuid();
 
                                 function maybeAnswer(msg) {
                                     if (msg.properties.correlationId === corrId) {
-                                        answer.resolve(msg.content.toString());
+                                        clearTimeout(timeoutCallback);
+                                        callback(null, msg.content.toString());
+                                        if(channel) {
+                                            try {
+                                                channel.close();
+                                            } catch(err) {
+                                                //channel closed
+                                            }
+                                        }
                                     }
                                 }
-
-                                return ch.assertQueue('', {exclusive: true})
-                                    .then(function (qok) {
-                                        return qok.queue;
-                                    }).then(function (queue) {
-                                        return ch.consume(queue, maybeAnswer, {noAck: true})
-                                            .then(function () {
-                                                return queue;
-                                            });
-                                    }).then(function (queue) {
-                                        console.log("before publish");
+                                ch.assertQueue('', {exclusive: true}, function(err,qok) {
+                                    if(err) {
+                                        callback(err,null);
+                                    }
+                                    ch.consume(qok.queue, maybeAnswer, {noAck: true}, function(err, ok) {
+                                        if(err) {
+                                            callback(err,null);
+                                        }
                                         ch.publish(endpoint, '', new Buffer(message.toString()), {
                                             expiration: options.globalTtl,
                                             correlationId: corrId,
-                                            replyTo: queue,
+                                            replyTo: qok.queue,
                                             persistent: false
-                                        });
-                                        console.log("after publish");
-                                        answer.promise.timeout(timeout).finally(function (response) {
-                                            try {
-                                                ch.close();
-                                            } catch (err) {
-                                                //channel is already closed
+                                        }, function(err, ok) {
+                                            if(err) {
+                                                callback(err,null);
                                             }
-                                        });
-                                    });
-                            });
+                                            timeoutCallback = setTimeout(function(){
+                                                callback(new Error("Call timeout after "+timeout+" ms."),null);
+                                                if(channel) {
+                                                    try {
+                                                        channel.close();
+                                                    } catch(err) {
+                                                        //channel closed
+                                                    }
+                                                }
+                                            }, timeout);
+                                        })
+                                    })
+                                })
+                            })
                         });
-
-                        return answer.promise;
                     }
                 };
             },
 
             close: function () {
-                return conn.close();
+                return connection.close();
             }
-        }
-    }).catch(function (err) {
-        console.log('error in connection: ' + err);
+        });
     });
-
 };
