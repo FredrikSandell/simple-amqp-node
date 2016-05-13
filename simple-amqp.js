@@ -74,6 +74,7 @@ exports.createEndpointFactory = function (options, externalCallback) {
                 });
 
                 channel = ch;
+                ch.prefetch(1);
                 if(err) {
                     consumer(err,null);
                 }
@@ -134,6 +135,7 @@ exports.createEndpointFactory = function (options, externalCallback) {
                         func(err,null);
                     }
                     channel = ch;
+                    ch.prefetch(1);
                     ch.assertExchange(endpoint, 'fanout', {
                         durable: false,
                         autoDelete: true
@@ -239,6 +241,7 @@ exports.createEndpointFactory = function (options, externalCallback) {
                                     callback(err,null);
                                 }
                                 channel = ch;
+                                ch.prefetch(1);
                                 var corrId = uuid();
 
                                 function maybeAnswer(msg) {
