@@ -59,7 +59,6 @@ exports.createEndpointFactory = function (options, externalCallback) {
         dom.add(connection);
 
         connection.on('close', function connectionClose(err) {
-            console.log(err);
             externalCallback(new Error('connection closed'),null);
         });
         
@@ -69,23 +68,19 @@ exports.createEndpointFactory = function (options, externalCallback) {
 
         function createEventReceiver(endpoint, isBroadcast, consumer) {
             var channel = null;
-            console.log("creating event receiver");
             connection.createChannel(function(err, ch){
                 ch.on('error', function (err) {
-                    console.log("channel error");
                     consumer(err,null);
                 });
 
                 channel = ch;
                 if(err) {
-                    console.log("error");
                     consumer(err,null);
                 }
                 ch.assertExchange(endpoint, 'fanout', {
                     durable: false,
-                    autoDelete: true
+                    autoDelete: isBroadcast
                 }, function(err, ok) {
-                    console.log(ok);
                     if(err) {
                         consumer(err,null);
                     }
@@ -94,8 +89,6 @@ exports.createEndpointFactory = function (options, externalCallback) {
                         durable: false,
                         autoDelete: false
                     }, function(err, ok) {
-                        console.log("ok");
-                        console.log(ok);
                         if(err) {
                             consumer(err,null);
                         }
@@ -107,7 +100,6 @@ exports.createEndpointFactory = function (options, externalCallback) {
                 })
             });
             function handleMessage(msg) {
-                console.log(msg.content);
                 consumer(null, msg.content.toString());
             };
             return {
