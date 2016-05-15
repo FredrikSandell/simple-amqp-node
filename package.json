@@ -1,6 +1,6 @@
 {
   "name": "simple-amqp",
-  "version": "0.1.7",
+  "version": "0.1.11",
   "description": "",
   "author": "Fredrik Sandell <fredrik.sandell1@gmail.com>",
   "main": "simple-amqp.js",

@@ -16,8 +16,9 @@ exports.createEndpointFactory = function (options, externalCallback) {
     }
     var connection = null;
     var dom = domain.create();
-    dom.on('error', function() {
+    dom.on('error', function(err) {
         console.log('Connection failed... will attempt reconnect soon');
+        console.log(err);
         if(connection != null) {
             connection = null;
             retryConnection();
@@ -59,25 +60,29 @@ exports.createEndpointFactory = function (options, externalCallback) {
         dom.add(connection);
 
         connection.on('close', function connectionClose(err) {
-            externalCallback(new Error('connection closed'),null);
+            externalCallback(err,null);
         });
         
-        connection.on('error', function () {
+        connection.on('error', function (err) {
+            console.stack(err);
             retryConnection();
         });
 
         function createEventReceiver(endpoint, isBroadcast, consumer) {
             var channel = null;
             connection.createChannel(function(err, ch){
+                if(err) {
+                    consumer(err,null);
+                    return;
+                }
+
                 ch.on('error', function (err) {
                     consumer(err,null);
                 });
 
                 channel = ch;
                 ch.prefetch(1);
-                if(err) {
-                    consumer(err,null);
-                }
+
                 ch.assertExchange(endpoint, 'fanout', {
                     durable: false,
                     autoDelete: isBroadcast
@@ -189,13 +194,18 @@ exports.createEndpointFactory = function (options, externalCallback) {
                 return {
                     emit: function (endpoint, message, callback) {
                         connection.createChannel(function(err,ch) {
+                            var useCallback = typeof(callback) == 'function';
                             ch.on('error', function (err) {
-                                callback(err,null);
+                                if(useCallback) {
+                                    callback(err, null);
+                                }
                             });
 
                             var dom = domain.create();
                             dom.on('error', function (err) {
-                                callback(err, null);
+                                if(useCallback) {
+                                    callback(err, null);
+                                }
                             });
                             dom.run(function () {
                                 ch.publish(endpoint, '', new Buffer(message), {
@@ -210,7 +220,9 @@ exports.createEndpointFactory = function (options, externalCallback) {
                                         }
                                     }
                                 });
-                                callback(null,true);
+                                if(useCallback) {
+                                    callback(null, true);
+                                }
                             });
                         });
                     }
