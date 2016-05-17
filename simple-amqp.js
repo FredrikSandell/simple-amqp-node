@@ -100,13 +100,14 @@ exports.createEndpointFactory = function (options, externalCallback) {
                         }
                         //no routing pattern for queue. Everything is forwarded
                         ch.bindQueue(ok.queue, endpoint, '', {},function(err,ok) {
-                            ch.consume(ok.queue, handleMessage, {noAck: true});
+                            ch.consume(ok.queue, handleMessage, {noAck: false});
                         });
                     })
                 })
             });
             function handleMessage(msg) {
                 consumer(null, msg.content.toString());
+                channel.ack(msg);
             };
             return {
                 close: function () {
@@ -162,13 +163,14 @@ exports.createEndpointFactory = function (options, externalCallback) {
                                     func(err,null);
                                 }
                                 ch.prefetch(1);
-                                ch.consume(queueBound.queue, handleMessage, {noAck: true});
+                                ch.consume(queueBound.queue, handleMessage, {noAck: false});
                             });
                         })
                     })
                 });
                 function handleMessage(msg) {
                     var response = func(null,msg.content.toString());
+                    channel.ack(msg);
                     channel.sendToQueue(msg.properties.replyTo,
                         new Buffer(response.toString()),
                         {correlationId: msg.properties.correlationId},function(err,ok) {
@@ -261,6 +263,7 @@ exports.createEndpointFactory = function (options, externalCallback) {
                                         clearTimeout(timeoutCallback);
                                         callback(null, msg.content.toString());
                                         if(channel) {
+                                            channel.ack(msg);
                                             try {
                                                 channel.close();
                                             } catch(err) {
@@ -273,7 +276,7 @@ exports.createEndpointFactory = function (options, externalCallback) {
                                     if(err) {
                                         callback(err,null);
                                     }
-                                    ch.consume(qok.queue, maybeAnswer, {noAck: true}, function(err, ok) {
+                                    ch.consume(qok.queue, maybeAnswer, {noAck: false}, function(err, ok) {
                                         if(err) {
                                             callback(err,null);
                                         }
